@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.egg-info/
+.venv/
+.env
+.idea/
+.vscode/
+
+# Runtime artifacts
+outputs/*
+!outputs/.gitkeep
+
+# Local training dataset (keep structure + manifest, ignore images)
+data/selfies/*
+!data/selfies/.gitkeep
+data/albedo/*
+!data/albedo/.gitkeep
+data/normal/*
+!data/normal/.gitkeep
+
+# Pre-trained weights and checkpoints
+weights/*
+!weights/.gitkeep
+
+# Training artifacts
+checkpoints/
+logs/
+*.ckpt
+*.pth
+*.pt
+
+# OS artifacts
+.DS_Store
+Thumbs.db
