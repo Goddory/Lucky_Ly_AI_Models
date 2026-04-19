@@ -209,12 +209,17 @@ class PartBasedGNNEncoder(nn.Module):
         part_vertices = vertices[node_indices]
 
         if HAS_PYG and subgraph is not None:
-            part_edge_index, _ = subgraph(
+            subgraph_out = subgraph(
                 subset=mask,
                 edge_index=edge_index,
                 relabel_nodes=True,
                 return_edge_mask=True,
             )
+            # PyG may return either edge_index only or a tuple depending on version.
+            if isinstance(subgraph_out, tuple):
+                part_edge_index = subgraph_out[0]
+            else:
+                part_edge_index = subgraph_out
         else:
             part_edge_index = self._fallback_subgraph(mask=mask, edge_index=edge_index)
 

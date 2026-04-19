@@ -186,6 +186,20 @@ def resolve_specs() -> Iterable[WeightSpec]:
     ]
 
 
+def _try_drive_fallback(spec: WeightSpec, output_path: Path) -> bool:
+    """Copy weights from Google Drive if running on Colab with mounted Drive."""
+    drive_base = Path(os.getenv("AVATAR_DRIVE_WEIGHTS", "/content/drive/MyDrive/avatar_weights"))
+    if not drive_base.exists():
+        return False
+
+    candidate = drive_base / spec.target_relative_path
+    if candidate.exists():
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(candidate), str(output_path))
+        return True
+    return False
+
+
 def download_weights(weights_dir: Path, include_optional: bool = True) -> None:
     weights_dir.mkdir(parents=True, exist_ok=True)
 
@@ -200,6 +214,12 @@ def download_weights(weights_dir: Path, include_optional: bool = True) -> None:
         target = weights_dir / spec.target_relative_path
         if target.exists():
             downloaded.append(f"[SKIP] {spec.name} already exists")
+            continue
+
+        # Try Google Drive first (fastest on Colab)
+        ok = _try_drive_fallback(spec, target)
+        if ok:
+            downloaded.append(f"[DRIVE] {spec.name} -> {target}")
             continue
 
         ok = _try_hf(spec, target)

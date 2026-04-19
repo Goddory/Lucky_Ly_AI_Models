@@ -44,21 +44,48 @@ class ResidualBlock(nn.Module):
 
 
 class SelfAttention2D(nn.Module):
-    def __init__(self, channels: int) -> None:
+    def __init__(self, channels: int, max_tokens: int = 4096) -> None:
         super().__init__()
-        self.query = nn.Conv2d(channels, channels // 8, kernel_size=1)
-        self.key = nn.Conv2d(channels, channels // 8, kernel_size=1)
+        reduced_channels = max(1, channels // 8)
+        self.query = nn.Conv2d(channels, reduced_channels, kernel_size=1)
+        self.key = nn.Conv2d(channels, reduced_channels, kernel_size=1)
         self.value = nn.Conv2d(channels, channels, kernel_size=1)
         self.gamma = nn.Parameter(torch.zeros(1))
+        self.max_tokens = max_tokens
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _attend(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.shape
         q = self.query(x).reshape(b, -1, h * w).transpose(1, 2)
         k = self.key(x).reshape(b, -1, h * w)
         v = self.value(x).reshape(b, -1, h * w)
 
         attn = torch.softmax(torch.bmm(q, k), dim=-1)
-        attended = torch.bmm(v, attn.transpose(1, 2)).reshape(b, c, h, w)
+        return torch.bmm(v, attn.transpose(1, 2)).reshape(b, c, h, w)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = x.shape
+        num_tokens = h * w
+
+        if num_tokens > self.max_tokens:
+            scale = (num_tokens / float(self.max_tokens)) ** 0.5
+            target_h = max(1, int(h / scale))
+            target_w = max(1, int(w / scale))
+            x_small = F.interpolate(
+                x,
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            )
+            attended_small = self._attend(x_small)
+            attended = F.interpolate(
+                attended_small,
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            )
+        else:
+            attended = self._attend(x)
+
         return x + self.gamma * attended
 
 

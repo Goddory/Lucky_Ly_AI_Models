@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from pathlib import Path
 
@@ -27,22 +28,34 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+TEXTURE_OUTPUT_SIZE = int(os.getenv("AVATAR_TEXTURE_SIZE", "512"))
+ALLOW_MISSING_WEIGHTS = os.getenv("AVATAR_ALLOW_MISSING_WEIGHTS", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
+if ALLOW_MISSING_WEIGHTS:
+    LOGGER.warning(
+        "AVATAR_ALLOW_MISSING_WEIGHTS is enabled. Running in non-strict test mode."
+    )
 
 reconstructor = DECAReconstructor(
     weights_dir=WEIGHTS_DIR,
     device=DEVICE,
     use_emoca=False,
-    fallback_on_error=False,
+    fallback_on_error=ALLOW_MISSING_WEIGHTS,
 )
 geometry_refiner = GeometryRefiner(
     weights_dir=WEIGHTS_DIR,
     device=DEVICE,
-    strict_checkpoint=True,
+    strict_checkpoint=not ALLOW_MISSING_WEIGHTS,
 )
 texture_pipeline = TextureSynthesisPipeline(
     weights_dir=WEIGHTS_DIR,
     device=DEVICE,
-    strict_pretrained=True,
+    strict_pretrained=not ALLOW_MISSING_WEIGHTS,
 )
 exporter = AvatarExporter(output_dir=OUTPUT_DIR)
 
@@ -93,11 +106,23 @@ async def generate_avatar(
             deterministic=deterministic,
             smooth_iterations=max(0, int(smooth_iterations)),
         )
-        tex = texture_pipeline.generate(
-            uv_texture=recon.uv_texture,
-            z_g=refined.z_g,
-            alpha=float(alpha),
-        )
+        try:
+            tex = texture_pipeline.generate(
+                uv_texture=recon.uv_texture,
+                z_g=refined.z_g,
+                alpha=float(alpha),
+                output_size=max(128, TEXTURE_OUTPUT_SIZE),
+            )
+        except torch.OutOfMemoryError:
+            # Retry at lower UV resolution for 8GB GPUs when texture attention spikes.
+            if DEVICE == "cuda":
+                torch.cuda.empty_cache()
+            tex = texture_pipeline.generate(
+                uv_texture=recon.uv_texture,
+                z_g=refined.z_g,
+                alpha=float(alpha),
+                output_size=256,
+            )
 
         export_result = exporter.export_glb(
             vertices=refined.refined_vertices,

@@ -22,7 +22,7 @@ avatar_3d_pipeline/
 ```
 
 ## Environment Setup (RTX 4060, CUDA 12.1)
-
+miniconda
 ```bash
 conda create -n avatar_env python=3.10 -y
 conda activate avatar_env
@@ -48,9 +48,31 @@ If required assets fail because of licensing or mirror availability, set the cor
 uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+Optional runtime flags:
+- `AVATAR_ALLOW_MISSING_WEIGHTS=1`: non-strict test mode (allows API boot with missing checkpoints).
+- `AVATAR_TEXTURE_SIZE=256`: reduces texture generation resolution to lower VRAM use.
+
 - Health check: `GET /health`
 - Avatar generation: `POST /generate-avatar` with multipart form-data field `image`
 - Generated assets are served from `/outputs/...`
+
+## Windows Auto-Start Scripts
+
+PowerShell scripts are in `scripts/`:
+
+```powershell
+# Start server now (default test mode + texture size 256)
+powershell -ExecutionPolicy Bypass -File .\scripts\start_avatar_api.ps1
+
+# Stop server
+powershell -ExecutionPolicy Bypass -File .\scripts\stop_avatar_api.ps1
+
+# Register auto-start at Windows logon
+powershell -ExecutionPolicy Bypass -File .\scripts\install_autostart_task.ps1
+
+# Remove auto-start task
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall_autostart_task.ps1
+```
 
 ## Fine-tune Texture Modules with LoRA
 
