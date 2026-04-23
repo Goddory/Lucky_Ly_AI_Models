@@ -108,9 +108,15 @@ class MeshPartEncoder(nn.Module):
                 nn.Linear(hidden_channels, out_channels),
             )
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        batch: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         if HAS_PYG:
-            batch = x.new_zeros((x.size(0),), dtype=torch.long)
+            if batch is None:
+                batch = x.new_zeros((x.size(0),), dtype=torch.long)
             x = self.conv1(x, edge_index)
             x = self.norm1(x, batch)
             x = F.gelu(x)
@@ -152,6 +158,11 @@ class PartBasedGNNEncoder(nn.Module):
         self.latent_dim = latent_dim
         self.partitioner = SemanticFacePartitioner()
 
+        # Cached partition data (set by precompute_partitions)
+        self._cached_masks: List[torch.Tensor] | None = None
+        self._cached_node_indices: List[torch.Tensor] | None = None
+        self._cached_sub_edges: List[torch.Tensor] | None = None
+
         self.part_encoders = nn.ModuleList(
             [
                 MeshPartEncoder(
@@ -174,6 +185,58 @@ class PartBasedGNNEncoder(nn.Module):
         )
         self.mu_head = nn.Linear(hidden_channels, latent_dim)
         self.logvar_head = nn.Linear(hidden_channels, latent_dim)
+
+    @torch.no_grad()
+    def precompute_partitions(self, ref_vertices: torch.Tensor, edge_index: torch.Tensor) -> None:
+        """Pre-compute partition masks and sub-edge-indices from a reference mesh.
+        Since all FLAME meshes share the same topology, this only needs to run once."""
+        masks = self.partitioner.split(ref_vertices)
+        self._cached_masks = masks
+        self._cached_node_indices = []
+        self._cached_sub_edges = []
+        for mask in masks:
+            part = self._extract_part_graph(ref_vertices, edge_index, mask)
+            node_indices = mask.nonzero(as_tuple=False).squeeze(-1)
+            if node_indices.numel() == 0:
+                node_indices = torch.arange(ref_vertices.size(0), device=ref_vertices.device)
+            self._cached_node_indices.append(node_indices)
+            self._cached_sub_edges.append(part["edge_index"])
+        print(f"   ✅ Encoder partitions cached ({self.num_parts} parts)")
+
+    @torch.no_grad()
+    def precompute_batch_partitions(self, batch_size: int, n_verts: int) -> None:
+        """Pre-compute batched partition indices for B meshes processed in parallel."""
+        if self._cached_node_indices is None:
+            raise RuntimeError("Call precompute_partitions() first.")
+
+        self._batched_node_idx: List[torch.Tensor] = []
+        self._batched_sub_edges: List[torch.Tensor] = []
+        self._batched_batch_idx: List[torch.Tensor] = []
+        device = self._cached_node_indices[0].device
+
+        for part_idx in range(self.num_parts):
+            node_idx = self._cached_node_indices[part_idx]  # [K]
+            sub_edge = self._cached_sub_edges[part_idx]      # [2, E_part]
+            K = node_idx.size(0)
+            E_part = sub_edge.size(1)
+
+            # Batched node indices: offset by i * n_verts for each mesh i
+            offsets_n = torch.arange(batch_size, device=device) * n_verts
+            batched_nodes = (node_idx.unsqueeze(0) + offsets_n.unsqueeze(1)).reshape(-1)
+
+            # Batched sub-edges: offset by i * K (indexing into part vertices)
+            offsets_e = torch.arange(batch_size, device=device) * K
+            batched_edges = (sub_edge.unsqueeze(-1) + offsets_e).reshape(2, -1)
+
+            # Batch index per node
+            batch_idx = torch.arange(batch_size, device=device).repeat_interleave(K)
+
+            self._batched_node_idx.append(batched_nodes)
+            self._batched_sub_edges.append(batched_edges)
+            self._batched_batch_idx.append(batch_idx)
+
+        self._batched_B = batch_size
+        print(f"   ✅ Encoder batch partitions cached (B={batch_size})")
 
     @staticmethod
     def _fallback_subgraph(mask: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
@@ -247,6 +310,51 @@ class PartBasedGNNEncoder(nn.Module):
         parts = torch.cat(part_embeddings, dim=-1)
         fused = self.fusion(parts)
         mu = self.mu_head(fused)
+        logvar = self.logvar_head(fused)
+
+        stacked_parts = torch.stack(part_embeddings, dim=1)
+        return EncoderOutput(mu=mu, logvar=logvar, part_embeddings=stacked_parts)
+
+    def forward_batched(self, vertices_flat: torch.Tensor, batch_size: int) -> EncoderOutput:
+        """Process B meshes in ONE forward pass. Requires precompute_partitions().
+
+        Args:
+            vertices_flat: [B*N, 3] concatenated vertices of B meshes
+            batch_size: number of meshes in this batch
+        Returns:
+            EncoderOutput with mu/logvar of shape [B, latent_dim]
+        """
+        use_cached = hasattr(self, '_batched_B') and batch_size == self._batched_B
+        n_verts = vertices_flat.size(0) // batch_size
+        device = vertices_flat.device
+
+        part_embeddings: List[torch.Tensor] = []
+        for part_idx in range(self.num_parts):
+            if use_cached:
+                node_idx = self._batched_node_idx[part_idx]
+                sub_edge = self._batched_sub_edges[part_idx]
+                batch_idx = self._batched_batch_idx[part_idx]
+            else:
+                # Dynamic computation for non-standard batch size
+                base_nodes = self._cached_node_indices[part_idx]
+                base_edges = self._cached_sub_edges[part_idx]
+                K = base_nodes.size(0)
+
+                offsets_n = torch.arange(batch_size, device=device) * n_verts
+                node_idx = (base_nodes.unsqueeze(0) + offsets_n.unsqueeze(1)).reshape(-1)
+
+                offsets_e = torch.arange(batch_size, device=device) * K
+                sub_edge = (base_edges.unsqueeze(-1) + offsets_e).reshape(2, -1)
+
+                batch_idx = torch.arange(batch_size, device=device).repeat_interleave(K)
+
+            part_verts = vertices_flat[node_idx]
+            embedding = self.part_encoders[part_idx](part_verts, sub_edge, batch_idx)
+            part_embeddings.append(embedding)
+
+        parts = torch.cat(part_embeddings, dim=-1)  # [B, num_parts * part_dim]
+        fused = self.fusion(parts)
+        mu = self.mu_head(fused)       # [B, latent_dim]
         logvar = self.logvar_head(fused)
 
         stacked_parts = torch.stack(part_embeddings, dim=1)

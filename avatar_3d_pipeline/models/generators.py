@@ -210,10 +210,21 @@ class SkinToneControlGA(nn.Module):
         x = torch.cat([m, alpha], dim=1)
         d1 = self.down1(x)
         d2 = self.down2(self.pool1(d1))
-        b = self.bottleneck(self.pool2(d2))
 
-        u1 = self.up1(b, d2)
-        u2 = self.up2(u1, d1)
+        # Gradient checkpointing: recompute activations during backward
+        # instead of storing them → saves ~40% VRAM at skip connections.
+        # We check torch.is_grad_enabled() because in Stage 1, GA is frozen (eval mode)
+        # but the input from G still has gradients.
+        if torch.is_grad_enabled():
+            from torch.utils.checkpoint import checkpoint
+            b  = checkpoint(self.bottleneck, self.pool2(d2), use_reentrant=False)
+            u1 = checkpoint(self.up1, b, d2,                 use_reentrant=False)
+            u2 = checkpoint(self.up2, u1, d1,                use_reentrant=False)
+        else:
+            b  = self.bottleneck(self.pool2(d2))
+            u1 = self.up1(b, d2)
+            u2 = self.up2(u1, d1)
+
         return torch.sigmoid(self.head(u2))
 
 

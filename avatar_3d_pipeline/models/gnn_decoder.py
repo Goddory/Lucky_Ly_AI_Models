@@ -118,6 +118,47 @@ class MeshGNNDecoder(nn.Module):
         displacement = self.displacement_head(x)
         return displacement
 
+    def forward_batched(
+        self,
+        z_g: torch.Tensor,
+        edge_index: torch.Tensor,
+        template_vertices: torch.Tensor,
+        batch: torch.Tensor,
+    ) -> torch.Tensor:
+        """Process B meshes in ONE forward pass.
+
+        Args:
+            z_g: [B, latent_dim]
+            edge_index: [2, B*E] batched edge index with offsets
+            template_vertices: [B*N, 3] concatenated vertices
+            batch: [B*N] mapping each vertex to its mesh index
+        Returns:
+            displacement: [B*N, 3]
+        """
+        x = self.node_embed(template_vertices)  # [B*N, hidden]
+        style = self.style(z_g)                  # [B, hidden]
+        x = x + style[batch]                     # broadcast per-mesh style
+
+        if HAS_PYG:
+            x = self.conv1(x, edge_index)
+            x = self.norm1(x, batch)
+            x = F.gelu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+
+            x = self.conv2(x, edge_index)
+            x = self.norm2(x, batch)
+            x = F.gelu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+
+            x = self.conv3(x, edge_index)
+            x = self.norm3(x, batch)
+            x = F.gelu(x)
+        else:
+            x = self.fallback(x)
+
+        displacement = self.displacement_head(x)  # [B*N, 3]
+        return displacement
+
     def decode_mesh(
         self,
         z_g: torch.Tensor,

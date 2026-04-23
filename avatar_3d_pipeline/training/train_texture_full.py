@@ -22,8 +22,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import logging
 import time
 from pathlib import Path
+
+# Suppress torch.compile inductor low-level log noise
+logging.getLogger("torch._inductor").setLevel(logging.ERROR)
+
+# Ensure project root is on sys.path regardless of working directory
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 import torch
 import torch.nn as nn
@@ -65,6 +75,7 @@ class TextureTrainer:
         if self.device.type == "cuda":
             torch.backends.cudnn.benchmark = True
             torch.backends.cuda.matmul.allow_tf32 = True
+            torch.set_float32_matmul_precision("high")  # TF32 aggressively
 
         self.output_dir = Path(args.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -76,17 +87,30 @@ class TextureTrainer:
         self.ge = PBRExtractorGE().to(self.device)
         self.disc = MultiScaleDiscriminator(in_channels=3).to(self.device)
 
+        # channels_last: faster conv on Ampere+ GPUs (NHWC layout)
+        _cl = torch.channels_last
+        self.g   = self.g.to(memory_format=_cl)
+        self.ga  = self.ga.to(memory_format=_cl)
+        self.gc  = self.gc.to(memory_format=_cl)
+        self.ge  = self.ge.to(memory_format=_cl)
+        self.disc = self.disc.to(memory_format=_cl)
+
         # Losses
         self.l1 = nn.L1Loss()
         self.perceptual = PerceptualLoss().to(self.device)
-        self.scaler_g = torch.cuda.amp.GradScaler(enabled=self.use_amp)
-        self.scaler_d = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.scaler_g = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.scaler_d = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
         # Load any existing weights
         self._load_existing_weights()
 
         # Configure stage
         self._configure_stage(args.stage)
+
+        # torch.compile: A100 has 108 SMs + 40-80GB VRAM → max-autotune safe
+        if self.device.type == "cuda":
+            self.g    = torch.compile(self.g,    mode="max-autotune")
+            self.disc = torch.compile(self.disc, mode="max-autotune")
 
         # Optimizers
         self.opt_g = torch.optim.AdamW(
@@ -96,6 +120,14 @@ class TextureTrainer:
         self.opt_d = torch.optim.AdamW(
             self.disc.parameters(),
             lr=args.lr_d, betas=(0.0, 0.999), weight_decay=args.weight_decay,
+        )
+
+        # LR Schedulers (CosineAnnealing for smooth convergence)
+        self.scheduler_g = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.opt_g, T_max=args.epochs, eta_min=1e-6,
+        )
+        self.scheduler_d = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.opt_d, T_max=args.epochs, eta_min=1e-6,
         )
 
         # Dataset
@@ -112,6 +144,8 @@ class TextureTrainer:
             num_workers=args.num_workers,
             pin_memory=True,
             drop_last=True,
+            persistent_workers=args.num_workers > 0,
+            prefetch_factor=4 if args.num_workers > 0 else None,
         )
 
         self.start_epoch = 0
@@ -213,15 +247,22 @@ class TextureTrainer:
 
     def train(self) -> None:
         best_loss = float("inf")
+        n_steps = len(self.loader)
+        log_every = max(1, n_steps // 10)
+
+        print(f"\n🎨 Bắt đầu training Texture: Epoch {self.start_epoch + 1} → {self.args.epochs}")
+        print(f"   Mỗi epoch = {n_steps} steps | Log mỗi {log_every} steps\n", flush=True)
 
         for epoch in range(self.start_epoch, self.args.epochs):
             epoch_metrics = {"g_total": 0.0, "d_total": 0.0, "recon": 0.0, "percep": 0.0}
             t0 = time.time()
 
+            print(f"── Epoch {epoch + 1}/{self.args.epochs} ──────────────────", flush=True)
+
             for step, batch in enumerate(self.loader):
-                selfie = batch["selfie"].to(self.device, non_blocking=True)
-                target_albedo = batch["target_albedo"].to(self.device, non_blocking=True)
-                target_normal = batch["target_normal"].to(self.device, non_blocking=True)
+                selfie = batch["selfie"].to(self.device, non_blocking=True).to(memory_format=torch.channels_last)
+                target_albedo = batch["target_albedo"].to(self.device, non_blocking=True).to(memory_format=torch.channels_last)
+                target_normal = batch["target_normal"].to(self.device, non_blocking=True).to(memory_format=torch.channels_last)
 
                 bsz = selfie.size(0)
                 z_g = torch.randn(bsz, self.args.latent_dim, device=self.device)
@@ -232,7 +273,7 @@ class TextureTrainer:
 
                 # ---- Train Discriminator ----
                 self.opt_d.zero_grad(set_to_none=True)
-                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                with torch.amp.autocast("cuda", enabled=self.use_amp):
                     with torch.no_grad():
                         pred = self._forward_pipeline(selfie, z_g, alpha)
                     real_preds = self.disc(target_a)
@@ -247,7 +288,7 @@ class TextureTrainer:
 
                 # ---- Train Generator(s) ----
                 self.opt_g.zero_grad(set_to_none=True)
-                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                with torch.amp.autocast("cuda", enabled=self.use_amp):
                     pred = self._forward_pipeline(selfie, z_g, alpha)
 
                     loss_recon_a = self.l1(pred["a"], target_a)
@@ -283,22 +324,47 @@ class TextureTrainer:
                 epoch_metrics["recon"] += loss_recon_a.item()
                 epoch_metrics["percep"] += loss_percep.item()
 
-            n_steps = max(1, len(self.loader))
-            avg = {k: v / n_steps for k, v in epoch_metrics.items()}
+                # In tiến độ mỗi 10%
+                if (step + 1) % log_every == 0 or (step + 1) == n_steps:
+                    done = step + 1
+                    pct = done / n_steps * 100
+                    elapsed_step = time.time() - t0
+                    speed = done / elapsed_step if elapsed_step > 0 else 0
+                    eta = (n_steps - done) / speed if speed > 0 else 0
+                    cur_g = epoch_metrics["g_total"] / done
+                    cur_d = epoch_metrics["d_total"] / done
+                    print(
+                        f"  [{pct:5.1f}%] {done}/{n_steps} | "
+                        f"G={cur_g:.4f} D={cur_d:.4f} | "
+                        f"{speed:.1f} step/s | ETA {eta:.0f}s",
+                        flush=True,
+                    )
+
+            self.scheduler_g.step()
+            self.scheduler_d.step()
+
+            n_steps_final = max(1, len(self.loader))
+            avg = {k: v / n_steps_final for k, v in epoch_metrics.items()}
             elapsed = time.time() - t0
+            lr_g = self.scheduler_g.get_last_lr()[0]
+
+            is_best = avg["g_total"] < best_loss
+            if is_best:
+                best_loss = avg["g_total"]
+            marker = " ⭐ BEST" if is_best else ""
 
             print(
-                f"[Epoch {epoch + 1}/{self.args.epochs}] "
+                f"✅ Epoch {epoch + 1}/{self.args.epochs} | "
                 f"G={avg['g_total']:.4f} D={avg['d_total']:.4f} "
                 f"recon={avg['recon']:.4f} percep={avg['percep']:.4f} "
-                f"({elapsed:.1f}s)"
+                f"lr={lr_g:.2e} ({elapsed:.0f}s){marker}\n",
+                flush=True,
             )
 
             if (epoch + 1) % self.args.save_every == 0:
                 self._save_checkpoint(epoch + 1, avg)
 
-            if avg["g_total"] < best_loss:
-                best_loss = avg["g_total"]
+            if is_best:
                 self._save_checkpoint(epoch + 1, avg, tag="best")
 
         print(f"\n✅ Texture training (stage {self.args.stage}) complete!")
@@ -351,8 +417,8 @@ def parse_args() -> argparse.Namespace:
                     help="Training stage: 1=G, 2=GA, 3=GC, 4=GE, all=GA+GC end-to-end")
 
     p.add_argument("--epochs", type=int, default=50)
-    p.add_argument("--batch-size", type=int, default=2)
-    p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--image-size", type=int, default=512)
     p.add_argument("--latent-dim", type=int, default=256)
     p.add_argument("--save-every", type=int, default=1)

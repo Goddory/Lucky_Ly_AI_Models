@@ -20,7 +20,7 @@ Colab:
         --input-dir /content/drive/MyDrive/avatar_data/selfies \
         --output-dir /content/drive/MyDrive/avatar_data/meshes \
         --weights-dir /content/drive/MyDrive/avatar_weights \
-        --max-samples 2000
+        --max-samples 5000 --resume
 """
 from __future__ import annotations
 
@@ -37,11 +37,13 @@ def main() -> None:
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
 
-    meshes_dir = output_dir / "meshes"
+    # Mesh .npy files are saved directly inside output_dir.
+    # train_geometry_vae.py expects them in --data-root/meshes/
+    meshes_dir = output_dir
     meshes_dir.mkdir(parents=True, exist_ok=True)
 
     # Collect input images
-    extensions = {"*.jpg", "*.jpeg", "*.png", "*.webp"}
+    extensions = {"*.jpg", "*.jpeg", "*.png", "*.webp", "*.jfif"}
     image_files = []
     for ext in extensions:
         image_files.extend(input_dir.glob(ext))
@@ -71,11 +73,26 @@ def main() -> None:
         print(f"❌ Cannot load reconstructor: {e}")
         sys.exit(1)
 
+    # Load shared faces if already saved (for resume)
+    faces_path = output_dir / "faces.npy"
+    shared_faces = np.load(str(faces_path)) if faces_path.exists() else None
+
+    # Count already done
+    already_done = {p.stem for p in meshes_dir.glob("*.npy")}
+    if args.resume and already_done:
+        print(f"⏩ Resume mode: skipping {len(already_done)} already-processed meshes")
+
     # Process images → mesh vertices
     saved = 0
-    shared_faces = None
 
     for img_path in tqdm(image_files, desc="Generating meshes"):
+        stem = img_path.stem
+
+        # Resume: skip if .npy already exists
+        if args.resume and stem in already_done:
+            saved += 1
+            continue
+
         try:
             result = reconstructor.reconstruct(img_path)
 
@@ -83,13 +100,12 @@ def main() -> None:
                 continue
 
             # Save vertices
-            stem = img_path.stem
             np.save(str(meshes_dir / f"{stem}.npy"), result.vertices)
 
-            # Save faces (shared topology, only need once)
+            # Save faces topology (shared across all meshes, save only once)
             if shared_faces is None and result.faces.size > 0:
                 shared_faces = result.faces
-                np.save(str(output_dir / "faces.npy"), shared_faces)
+                np.save(str(faces_path), shared_faces)
 
             saved += 1
         except Exception as e:
@@ -114,6 +130,8 @@ def parse_args() -> argparse.Namespace:
                     help="Model weights directory")
     p.add_argument("--device", type=str, default=None)
     p.add_argument("--max-samples", type=int, default=None)
+    p.add_argument("--resume", action="store_true",
+                    help="Skip images whose .npy mesh already exists in output dir")
     return p.parse_args()
 
 

@@ -96,18 +96,16 @@ def try_deca_generation(
     Returns None if DECA is not available or fails.
     """
     try:
-        from core.reconstructor import DECAReconstructor
         result = deca_model.reconstruct(image)
-        if result and hasattr(result, "uv_texture_map") and result.uv_texture_map is not None:
-            albedo = cv2.resize(result.uv_texture_map, (target_size, target_size))
-            if hasattr(result, "uv_normal_map") and result.uv_normal_map is not None:
-                normal = cv2.resize(result.uv_normal_map, (target_size, target_size))
-            else:
-                normal = estimate_normal_from_image(albedo)
+        if result and hasattr(result, "uv_texture") and result.uv_texture is not None:
+            albedo = cv2.resize(result.uv_texture, (target_size, target_size))
+            normal = estimate_normal_from_image(albedo)
             return albedo, normal
-    except Exception:
+    except Exception as e:
+        print(f"DECA generation failed: {e}")
         pass
     return None
+
 
 
 def process_single_image(
@@ -117,6 +115,7 @@ def process_single_image(
     output_normal_dir: Path,
     target_size: int,
     deca_model=None,
+    skip_existing: bool = False,
 ) -> str | None:
     """Process one selfie image → (selfie, albedo, normal) triplet."""
     try:
@@ -128,6 +127,15 @@ def process_single_image(
             return None
 
         stem = image_path.stem
+
+        # Resume: skip if all 3 output files already exist
+        if skip_existing:
+            selfie_out = output_selfie_dir / f"{stem}.png"
+            albedo_out = output_albedo_dir / f"{stem}.png"
+            normal_out = output_normal_dir / f"{stem}.png"
+            if selfie_out.exists() and albedo_out.exists() and normal_out.exists():
+                return stem
+
         selfie_resized = cv2.resize(img_np, (target_size, target_size))
 
         # Try DECA first, fallback to estimation
@@ -166,7 +174,11 @@ def main() -> None:
     output_normal_dir.mkdir(parents=True, exist_ok=True)
 
     # Collect input images
-    extensions = {"*.jpg", "*.jpeg", "*.png", "*.webp", "*.bmp"}
+    if args.ext:
+        extensions = {f"*{args.ext}"}
+    else:
+        extensions = {"*.jpg", "*.jpeg", "*.png", "*.webp", "*.bmp", "*.jfif"}
+        
     image_files = []
     for ext in extensions:
         image_files.extend(input_dir.glob(ext))
@@ -193,7 +205,7 @@ def main() -> None:
             deca_model = DECAReconstructor(
                 weights_dir=args.weights_dir,
                 device=args.device,
-                strict_checkpoint=False,
+                fallback_on_error=False,
             )
             print("✅ DECA loaded — using 3D reconstruction for map generation")
         except Exception as e:
@@ -209,6 +221,7 @@ def main() -> None:
             output_normal_dir,
             target_size=args.image_size,
             deca_model=deca_model,
+            skip_existing=args.resume,
         )
         if stem:
             valid_stems.append(stem)
@@ -241,6 +254,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--image-size", type=int, default=512)
     p.add_argument("--max-samples", type=int, default=None)
     p.add_argument("--device", type=str, default=None)
+    p.add_argument("--ext", type=str, default=None,
+                    help="Filter by specific extension (e.g. '.jpg')")
+    p.add_argument("--resume", action="store_true",
+                    help="Skip images that already have all 3 output files")
     p.add_argument("--skip-deca", action="store_true",
                     help="Skip DECA and use image-based estimation only")
     return p.parse_args()

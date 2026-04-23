@@ -75,14 +75,24 @@ class DECAReconstructor:
         if self._deca_loaded:
             return
 
+        # Python 3.12 compatibility patches
+        import inspect
+        if not hasattr(inspect, 'getargspec'):
+            inspect.getargspec = inspect.getfullargspec
+        if not hasattr(np, 'bool'):
+            np.bool = np.bool_
+            np.int = np.int_
+            np.float = np.float64
+            np.complex = np.complex128
+
         try:
             from decalib.deca import DECA
             from decalib.utils.config import cfg as deca_cfg
 
-            if hasattr(deca_cfg, "model") and hasattr(deca_cfg.model, "use_tex"):
-                deca_cfg.model.use_tex = True
-            if hasattr(deca_cfg, "model") and hasattr(deca_cfg.model, "extract_tex"):
-                deca_cfg.model.extract_tex = True
+            deca_cfg.model.defrost()
+            deca_cfg.model.use_tex = True
+            deca_cfg.model.extract_tex = True
+            deca_cfg.model.freeze()
 
             pretrained_candidates = [
                 self.weights_dir / "deca" / "deca_model.tar",
@@ -108,10 +118,14 @@ class DECAReconstructor:
             self._deca = None
             self._deca_loaded = True
 
-    def _preprocess(self, image_path: str | Path) -> Tuple[torch.Tensor, np.ndarray]:
-        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-        if image is None:
-            raise FileNotFoundError(f"Could not read image from {image_path}")
+    def _preprocess(self, image_path: str | Path | np.ndarray) -> Tuple[torch.Tensor, np.ndarray]:
+        if isinstance(image_path, np.ndarray):
+            # Already a numpy array (RGB)
+            image = cv2.cvtColor(image_path, cv2.COLOR_RGB2BGR)
+        else:
+            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+            if image is None:
+                raise FileNotFoundError(f"Could not read image from {image_path}")
 
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image_resized = cv2.resize(image, (self.image_size, self.image_size))
@@ -235,7 +249,7 @@ class DECAReconstructor:
             uv_texture=cv2.resize(image_rgb, (1024, 1024), interpolation=cv2.INTER_CUBIC),
         )
 
-    def reconstruct(self, image_path: str | Path) -> ReconstructionOutput:
+    def reconstruct(self, image_path: str | Path | np.ndarray) -> ReconstructionOutput:
         self._load_deca()
         image_tensor, image_rgb = self._preprocess(image_path)
 
@@ -261,7 +275,7 @@ class DECAReconstructor:
                 # In case DECA does not expose UV coordinates in this runtime build.
                 uv_coords = self._fallback_reconstruction(image_rgb).uv_coords
 
-            uv_texture = self._extract_uv_texture(visdict, image_rgb)
+            uv_texture = self._extract_uv_texture({**visdict, **opdict}, image_rgb)
 
             shape_params = self._to_numpy(codedict.get("shape", np.array([]))).reshape(-1)
             expression_params = self._to_numpy(codedict.get("exp", np.array([]))).reshape(-1)

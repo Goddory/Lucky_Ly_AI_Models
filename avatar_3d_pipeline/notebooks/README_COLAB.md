@@ -78,7 +78,7 @@ for wf in weight_files:
 from datasets import load_dataset
 import os
 
-output_dir = "/content/drive/MyDrive/avatar_data/ffhq_raw"
+output_dir = "/content/drive/MyDrive/avatar_project/avatar_data/ffhq_raw"
 os.makedirs(output_dir, exist_ok=True)
 
 ds = load_dataset("mattymchen/ffhq-1024", split="train[:5000]")
@@ -93,8 +93,8 @@ print(f"✅ Downloaded {len(ds)} FFHQ images")
 ### Cell 3: Generate synthetic pairs
 ```python
 !python training/generate_synthetic_pairs.py \
-    --input-dir /content/drive/MyDrive/avatar_data/ffhq_raw \
-    --output-dir /content/drive/MyDrive/avatar_data \
+    --input-dir /content/drive/MyDrive/avatar_project/avatar_data/ffhq_raw \
+    --output-dir /content/drive/MyDrive/avatar_project/avatar_data \
     --weights-dir weights \
     --image-size 512 \
     --max-samples 5000
@@ -103,7 +103,7 @@ print(f"✅ Downloaded {len(ds)} FFHQ images")
 ### Cell 4: Validate dataset
 ```python
 !python training/validate_dataset.py \
-    --data-root /content/drive/MyDrive/avatar_data \
+    --data-root /content/drive/MyDrive/avatar_project/avatar_data \
     --min-size 256 --fix
 ```
 
@@ -121,7 +121,7 @@ print(f"✅ Downloaded {len(ds)} FFHQ images")
 import numpy as np
 from pathlib import Path
 
-mesh_dir = Path("/content/drive/MyDrive/avatar_data/meshes")
+mesh_dir = Path("/content/drive/MyDrive/avatar_project/avatar_data/meshes")
 mesh_dir.mkdir(parents=True, exist_ok=True)
 
 # Kiểm tra nếu đã có mesh data
@@ -137,8 +137,8 @@ if len(existing) == 0:
 ### Cell 3: Train
 ```python
 !python training/train_geometry_vae.py \
-    --data-root /content/drive/MyDrive/avatar_data/meshes \
-    --output-dir /content/drive/MyDrive/avatar_checkpoints/geometry \
+    --data-root /content/drive/MyDrive/avatar_project/avatar_data/meshes \
+    --output-dir /content/drive/MyDrive/avatar_project/avatar_checkpoints/geometry \
     --epochs 100 \
     --lr 1e-4 \
     --save-every 1 \
@@ -153,7 +153,7 @@ if len(existing) == 0:
 import json
 from pathlib import Path
 
-metrics_path = Path("/content/drive/MyDrive/avatar_checkpoints/geometry/metrics_latest.json")
+metrics_path = Path("/content/drive/MyDrive/avatar_project/avatar_checkpoints/geometry/metrics_latest.json")
 if metrics_path.exists():
     metrics = json.loads(metrics_path.read_text())
     print(f"📊 Latest checkpoint:")
@@ -172,9 +172,9 @@ if metrics_path.exists():
 ### Cell 2: Stage 1 — Train G (texture prior)
 ```python
 !python training/train_texture_full.py \
-    --data-root /content/drive/MyDrive/avatar_data \
-    --weights-dir /content/drive/MyDrive/avatar_weights \
-    --output-dir /content/drive/MyDrive/avatar_checkpoints/texture \
+    --data-root /content/drive/MyDrive/avatar_project/avatar_data \
+    --weights-dir /content/drive/MyDrive/avatar_project/avatar_weights \
+    --output-dir /content/drive/MyDrive/avatar_project/avatar_checkpoints/texture \
     --stage 1 \
     --epochs 50 \
     --batch-size 2 \
@@ -186,9 +186,9 @@ if metrics_path.exists():
 ```python
 # Chạy SAU khi stage 1 complete
 !python training/train_texture_full.py \
-    --data-root /content/drive/MyDrive/avatar_data \
-    --weights-dir /content/drive/MyDrive/avatar_checkpoints/texture \
-    --output-dir /content/drive/MyDrive/avatar_checkpoints/texture \
+    --data-root /content/drive/MyDrive/avatar_project/avatar_data \
+    --weights-dir /content/drive/MyDrive/avatar_project/avatar_checkpoints/texture \
+    --output-dir /content/drive/MyDrive/avatar_project/avatar_checkpoints/texture \
     --stage 2 \
     --epochs 30 \
     --batch-size 2 \
@@ -199,16 +199,16 @@ if metrics_path.exists():
 ```python
 # Stage 3: Reflectance
 !python training/train_texture_full.py \
-    --data-root /content/drive/MyDrive/avatar_data \
-    --weights-dir /content/drive/MyDrive/avatar_checkpoints/texture \
-    --output-dir /content/drive/MyDrive/avatar_checkpoints/texture \
+    --data-root /content/drive/MyDrive/avatar_project/avatar_data \
+    --weights-dir /content/drive/MyDrive/avatar_project/avatar_checkpoints/texture \
+    --output-dir /content/drive/MyDrive/avatar_project/avatar_checkpoints/texture \
     --stage 3 --epochs 30 --batch-size 2 --save-every 1
 
 # Stage 4: PBR extraction
 !python training/train_texture_full.py \
-    --data-root /content/drive/MyDrive/avatar_data \
-    --weights-dir /content/drive/MyDrive/avatar_checkpoints/texture \
-    --output-dir /content/drive/MyDrive/avatar_checkpoints/texture \
+    --data-root /content/drive/MyDrive/avatar_project/avatar_data \
+    --weights-dir /content/drive/MyDrive/avatar_project/avatar_checkpoints/texture \
+    --output-dir /content/drive/MyDrive/avatar_project/avatar_checkpoints/texture \
     --stage 4 --epochs 20 --batch-size 2 --save-every 1
 ```
 
@@ -221,8 +221,8 @@ if metrics_path.exists():
 ### Cell 2: Sinh pairs cho ảnh VN
 ```python
 !python training/generate_synthetic_pairs.py \
-    --input-dir /content/drive/MyDrive/avatar_data/vietnamese/selfies \
-    --output-dir /content/drive/MyDrive/avatar_data/vietnamese \
+    --input-dir /content/drive/MyDrive/avatar_project/avatar_data/vietnamese/selfies \
+    --output-dir /content/drive/MyDrive/avatar_project/avatar_data/vietnamese \
     --weights-dir weights \
     --image-size 512
 ```
@@ -230,9 +230,9 @@ if metrics_path.exists():
 ### Cell 3: Fine-tune
 ```python
 !python training/fine_tune_texture.py \
-    --data-root /content/drive/MyDrive/avatar_data/vietnamese \
-    --weights-dir /content/drive/MyDrive/avatar_checkpoints/texture \
-    --output-dir /content/drive/MyDrive/avatar_checkpoints/texture_lora \
+    --data-root /content/drive/MyDrive/avatar_project/avatar_data/vietnamese \
+    --weights-dir /content/drive/MyDrive/avatar_project/avatar_checkpoints/texture \
+    --output-dir /content/drive/MyDrive/avatar_project/avatar_checkpoints/texture_lora \
     --batch-size 1 \
     --grad-accum-steps 8 \
     --lora-rank 8 \
@@ -249,11 +249,11 @@ if metrics_path.exists():
 ### Cell 2: Run evaluation
 ```python
 !python training/evaluate.py \
-    --pred-dir /content/drive/MyDrive/avatar_data/albedo \
-    --gt-dir /content/drive/MyDrive/avatar_data/albedo \
+    --pred-dir /content/drive/MyDrive/avatar_project/avatar_data/albedo \
+    --gt-dir /content/drive/MyDrive/avatar_project/avatar_data/albedo \
     --metrics all \
     --image-size 512 \
-    --report-path /content/drive/MyDrive/avatar_checkpoints/eval_report.json
+    --report-path /content/drive/MyDrive/avatar_project/avatar_checkpoints/eval_report.json
 ```
 
 ---
